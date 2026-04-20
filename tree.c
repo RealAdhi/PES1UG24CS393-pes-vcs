@@ -104,7 +104,7 @@ static int write_tree_level(IndexEntry *entries, int count, int depth, ObjectID 
             int name_len = slash - (path + depth);
             char dir_name[256];
             strncpy(dir_name, path + depth, name_len);
-            dir_name[dir_name[name_len] = '\0'];
+            dir_name[name_len] = '\0'; // FIXED TYPO HERE
 
             int j = i;
             while (j < count && strncmp(entries[j].path + depth, dir_name, name_len) == 0 && entries[j].path[depth + name_len] == '/') {
@@ -114,7 +114,7 @@ static int write_tree_level(IndexEntry *entries, int count, int depth, ObjectID 
             ObjectID sub_id;
             if (write_tree_level(&entries[i], j - i, depth + name_len + 1, &sub_id) != 0) return -1;
 
-            tree.entries[tree.count].mode = MODE_DIR;
+            tree.entries[tree.count].mode = 0040000; 
             tree.entries[tree.count].hash = sub_id;
             strcpy(tree.entries[tree.count].name, dir_name);
             tree.count++;
@@ -125,6 +125,9 @@ static int write_tree_level(IndexEntry *entries, int count, int depth, ObjectID 
     void *data;
     size_t len;
     if (tree_serialize(&tree, &data, &len) != 0) return -1;
+    
+    // Explicitly cast to fix implicit declaration warnings if necessary
+    extern int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
     int rc = object_write(OBJ_TREE, data, len, out_id);
     free(data);
     return rc;
