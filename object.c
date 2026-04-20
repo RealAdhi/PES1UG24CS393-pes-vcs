@@ -83,7 +83,8 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
 
     char hex[HASH_HEX_SIZE + 1];
     hash_to_hex(id_out, hex);
-    char shard_dir[512], tmp_path[512], final_path[512];
+    // Find these lines in object_write and change the sizes to 1024
+    char shard_dir[1024], tmp_path[1024], final_path[1024];
     
     snprintf(shard_dir, sizeof(shard_dir), "%s/%.2s", OBJECTS_DIR, hex);
     snprintf(final_path, sizeof(final_path), "%s/%.2s/%s", OBJECTS_DIR, hex, hex + 2);
