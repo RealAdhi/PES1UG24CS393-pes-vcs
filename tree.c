@@ -12,16 +12,22 @@
 #define MODE_EXEC      0100755
 #define MODE_DIR       0040000
 
+// Forward declaration of object_write to prevent implicit declaration errors
+extern int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
+
 // ─── PROVIDED ───────────────────────────────────────────────────────────────
 
+// Determine the object mode for a filesystem path.
 uint32_t get_file_mode(const char *path) {
     struct stat st;
     if (lstat(path, &st) != 0) return 0;
+
     if (S_ISDIR(st.st_mode))  return MODE_DIR;
     if (st.st_mode & S_IXUSR) return MODE_EXEC;
     return MODE_FILE;
 }
 
+// Parse binary tree data into a Tree struct safely.
 int tree_parse(const void *data, size_t len, Tree *tree_out) {
     tree_out->count = 0;
     const uint8_t *ptr = (const uint8_t *)data;
@@ -29,6 +35,7 @@ int tree_parse(const void *data, size_t len, Tree *tree_out) {
 
     while (ptr < end && tree_out->count < MAX_TREE_ENTRIES) {
         TreeEntry *entry = &tree_out->entries[tree_out->count];
+
         const uint8_t *space = memchr(ptr, ' ', end - ptr);
         if (!space) return -1;
 
@@ -39,6 +46,7 @@ int tree_parse(const void *data, size_t len, Tree *tree_out) {
         entry->mode = strtol(mode_str, NULL, 8);
 
         ptr = space + 1;
+
         const uint8_t *null_byte = memchr(ptr, '\0', end - ptr);
         if (!null_byte) return -1;
 
@@ -48,6 +56,7 @@ int tree_parse(const void *data, size_t len, Tree *tree_out) {
         entry->name[name_len] = '\0';
 
         ptr = null_byte + 1;
+
         if (ptr + HASH_SIZE > end) return -1; 
         memcpy(entry->hash.hash, ptr, HASH_SIZE);
         ptr += HASH_SIZE;
@@ -57,10 +66,12 @@ int tree_parse(const void *data, size_t len, Tree *tree_out) {
     return 0;
 }
 
+// Helper for qsort to ensure consistent tree hashing
 static int compare_tree_entries(const void *a, const void *b) {
     return strcmp(((const TreeEntry *)a)->name, ((const TreeEntry *)b)->name);
 }
 
+// Serialize a Tree struct into binary format for storage.
 int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
     size_t max_size = tree->count * 296; 
     uint8_t *buffer = malloc(max_size);
@@ -85,6 +96,7 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
 
 // ─── IMPLEMENTATION ─────────────────────────────────────────────────────────
 
+// Recursive helper to build tree hierarchy
 static int write_tree_level(IndexEntry *entries, int count, int depth, ObjectID *out_id) {
     Tree tree;
     tree.count = 0;
@@ -95,30 +107,35 @@ static int write_tree_level(IndexEntry *entries, int count, int depth, ObjectID 
         const char *slash = strchr(path + depth, '/');
 
         if (!slash) {
+            // Entry is a file at this level
             tree.entries[tree.count].mode = entries[i].mode;
             tree.entries[tree.count].hash = entries[i].hash;
             strcpy(tree.entries[tree.count].name, path + depth);
             tree.count++;
             i++;
         } else {
+            // Entry is a directory
             int name_len = slash - (path + depth);
             char dir_name[256];
             strncpy(dir_name, path + depth, name_len);
-            dir_name[name_len] = '\0'; // FIXED TYPO HERE
+            dir_name[name_len] = '\0';
 
+            // Find how many entries share this same subdirectory prefix
             int j = i;
             while (j < count && strncmp(entries[j].path + depth, dir_name, name_len) == 0 && entries[j].path[depth + name_len] == '/') {
                 j++;
             }
 
+            // Recurse to build the subdirectory tree
             ObjectID sub_id;
             if (write_tree_level(&entries[i], j - i, depth + name_len + 1, &sub_id) != 0) return -1;
 
-            tree.entries[tree.count].mode = 0040000; 
+            tree.entries[tree.count].mode = MODE_DIR;
             tree.entries[tree.count].hash = sub_id;
             strcpy(tree.entries[tree.count].name, dir_name);
             tree.count++;
-            i = j;
+            
+            i = j; // Move to the next unique entry after this directory
         }
     }
 
@@ -126,13 +143,12 @@ static int write_tree_level(IndexEntry *entries, int count, int depth, ObjectID 
     size_t len;
     if (tree_serialize(&tree, &data, &len) != 0) return -1;
     
-    // Explicitly cast to fix implicit declaration warnings if necessary
-    extern int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
     int rc = object_write(OBJ_TREE, data, len, out_id);
     free(data);
     return rc;
 }
 
+// Build a tree from the current index and save to object store.
 int tree_from_index(ObjectID *id_out) {
     Index index;
     if (index_load(&index) != 0) return -1;
