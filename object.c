@@ -94,9 +94,97 @@ int object_exists(const ObjectID *id) {
 //
 // Returns 0 on success, -1 on error.
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
-    // TODO: Implement
-    (void)type; (void)data; (void)len; (void)id_out;
-    return -1;
+    const char *type_str = type == OBJ_BLOB ? "blob" : (type == OBJ_TREE ? "tree" : "commit");
+    char header[64];
+    int header_len = snprintf(header, sizeof(header), "%s %zu", type_str, len);
+
+    size_t full_len = header_len + 1 + len;
+    uint8_t *full_data = malloc(full_len);
+    if (!full_data) return -1;
+
+    // Build header + null terminator + data
+    memcpy(full_data, header, header_len);
+    full_data[header_len] = '\0';
+    memcpy(full_data + header_len + 1, data, len);
+
+    compute_hash(full_data, full_len, id_out);
+
+    if (object_exists(id_out)) {
+        free(full_data);
+        return 0; // Deduplication: don't write if it exists
+    }
+
+    char hex[HASH_HEX_SIZE + 1];
+    hash_to_hex(id_out, hex);
+    char shard_dir[512], tmp_path[512], final_path[512];
+    
+    snprintf(shard_dir, sizeof(shard_dir), "%s/%.2s", OBJECTS_DIR, hex);
+    snprintf(final_path, sizeof(final_path), "%s/%.2s/%s", OBJECTS_DIR, hex, hex + 2);
+    snprintf(tmp_path, sizeof(tmp_path), "%s/tmp_XXXXXX", shard_dir);
+
+    mkdir(shard_dir, 0755);
+
+    // Atomic write pattern: temp file -> rename
+    int fd = mkstemp(tmp_path);
+    if (fd < 0) { free(full_data); return -1; }
+
+    if (write(fd, full_data, full_len) != (ssize_t)full_len) {
+        close(fd); unlink(tmp_path); free(full_data); return -1;
+    }
+
+    fsync(fd);
+    close(fd);
+
+    if (rename(tmp_path, final_path) != 0) {
+        unlink(tmp_path); free(full_data); return -1;
+    }
+
+    free(full_data);
+    return 0;
+}
+
+int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
+    char path[512];
+    object_path(id, path, sizeof(path));
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+
+    fseek(f, 0, SEEK_END);
+    long file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    uint8_t *full_data = malloc(file_size);
+    if (!full_data) { fclose(f); return -1; }
+
+    if (fread(full_data, 1, file_size, f) != (size_t)file_size) {
+        free(full_data); fclose(f); return -1;
+    }
+    fclose(f);
+
+    // Verify Integrity
+    ObjectID computed_id;
+    compute_hash(full_data, file_size, &computed_id);
+    if (memcmp(computed_id.hash, id->hash, HASH_SIZE) != 0) {
+        free(full_data); return -1; 
+    }
+
+    uint8_t *null_byte = memchr(full_data, '\0', file_size);
+    char type_str[16];
+    size_t size_val;
+    sscanf((char *)full_data, "%15s %zu", type_str, &size_val);
+
+    if (strcmp(type_str, "blob") == 0) *type_out = OBJ_BLOB;
+    else if (strcmp(type_str, "tree") == 0) *type_out = OBJ_TREE;
+    else *type_out = OBJ_COMMIT;
+
+    size_t data_len = file_size - (null_byte - full_data + 1);
+    *data_out = malloc(data_len);
+    memcpy(*data_out, null_byte + 1, data_len);
+    *len_out = data_len;
+
+    free(full_data);
+    return 0;
 }
 
 // Read an object from the store.
